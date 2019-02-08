@@ -1,0 +1,324 @@
+##########################################################################################################
+##########################################################################################################
+#
+# INTENT:   Quarantine a network to allow limited update traffic only for isolation of underpatched systems.
+#
+# UPADATED: Feb 7th 2019       
+#
+# VENDORS:  Rules are added to allow the follwing product update servers
+#
+#           Operating Systems
+#            - Apple MacOS X
+#            - Microsoft Windows
+#            - Google Chrome OS
+#            - RedHat Enterprise Linux
+#            - Ubuntu Linux
+#
+#           Mobile Devices
+#            - Android
+#            - Apple iOS
+$
+#           Select AntiViruses         
+#            - ClamAV
+#            - Widows Defender
+#            - McAfee
+#            - BitDefender
+#
+# DETAILS:   These iptables firewall rules are intended to isolate a network to only allow updates
+#            Operating Systems, OS Vendor Applications, Mobile Devices, Apps, and Antivirus Programs.
+#            
+#            All other traffic without a patch related intent is dropped.
+#
+#            Additional rules are drops intended for general hardening of network traffic.
+#
+#            FQDNs are used to address upate servers. DNS must also be allowed as many update vendors
+#            run update servers with ever changing IPs.  The Quad9DNS service is allowed only as 
+#            9.9.9.9 for the benefit of it's Threat Intelligence scanning. 
+#
+###########################################################################################################
+
+
+
+
+
+##############################################################        PREROUTING SECURITY RULES      ######
+# Dropping extra suspicious packets early in prerouting
+
+
+###  Invalid packets, Dropped ### 
+/sbin/iptables -t mangle -A PREROUTING -m conntrack --ctstate INVALID -j DROP  
+
+###  TCP packets that are new and are not SYN, Dropped ### 
+/sbin/iptables -t mangle -A PREROUTING -p tcp ! --syn -m conntrack --ctstate NEW -j DROP 
+ 
+###  SYN packets with suspicious MSS value, Dropped### 
+/sbin/iptables -t mangle -A PREROUTING -p tcp -m conntrack --ctstate NEW -m tcpmss ! --mss 536:65535 -j DROP  
+
+###  Packets with bogus TCP flags, Dropped ### 
+/sbin/iptables -t mangle -A PREROUTING -p tcp --tcp-flags FIN,SYN,RST,PSH,ACK,URG NONE -j DROP 
+/sbin/iptables -t mangle -A PREROUTING -p tcp --tcp-flags FIN,SYN FIN,SYN -j DROP 
+/sbin/iptables -t mangle -A PREROUTING -p tcp --tcp-flags SYN,RST SYN,RST -j DROP 
+/sbin/iptables -t mangle -A PREROUTING -p tcp --tcp-flags FIN,RST FIN,RST -j DROP 
+/sbin/iptables -t mangle -A PREROUTING -p tcp --tcp-flags FIN,ACK FIN -j DROP 
+/sbin/iptables -t mangle -A PREROUTING -p tcp --tcp-flags ACK,URG URG -j DROP 
+/sbin/iptables -t mangle -A PREROUTING -p tcp --tcp-flags ACK,FIN FIN -j DROP 
+/sbin/iptables -t mangle -A PREROUTING -p tcp --tcp-flags ACK,PSH PSH -j DROP 
+/sbin/iptables -t mangle -A PREROUTING -p tcp --tcp-flags ALL ALL -j DROP 
+/sbin/iptables -t mangle -A PREROUTING -p tcp --tcp-flags ALL NONE -j DROP 
+/sbin/iptables -t mangle -A PREROUTING -p tcp --tcp-flags ALL FIN,PSH,URG -j DROP 
+/sbin/iptables -t mangle -A PREROUTING -p tcp --tcp-flags ALL SYN,FIN,PSH,URG -j DROP 
+/sbin/iptables -t mangle -A PREROUTING -p tcp --tcp-flags ALL SYN,RST,ACK,FIN,URG -j DROP  
+
+###  Spoofed inbound packets from internal ranges, Dropped ### 
+/sbin/iptables -t mangle -A PREROUTING -s 224.0.0.0/3 -j DROP 
+/sbin/iptables -t mangle -A PREROUTING -s 169.254.0.0/16 -j DROP 
+/sbin/iptables -t mangle -A PREROUTING -s 172.16.0.0/12 -j DROP 
+/sbin/iptables -t mangle -A PREROUTING -s 192.0.2.0/24 -j DROP 
+/sbin/iptables -t mangle -A PREROUTING -s 192.168.0.0/16 -j DROP 
+/sbin/iptables -t mangle -A PREROUTING -s 10.0.0.0/8 -j DROP 
+/sbin/iptables -t mangle -A PREROUTING -s 0.0.0.0/8 -j DROP 
+/sbin/iptables -t mangle -A PREROUTING -s 240.0.0.0/5 -j DROP 
+/sbin/iptables -t mangle -A PREROUTING -s 127.0.0.0/8 ! -i lo -j DROP  
+
+###  ICMP (incl. Ping), Dropped ### 
+/sbin/iptables -t mangle -A PREROUTING -p icmp -j DROP  
+
+###  Drop fragments in all chains ### 
+/sbin/iptables -t mangle -A PREROUTING -f -j DROP  
+
+
+
+
+
+##############################################################   MORE SECURITY RULES
+# Drop unexpected, scanning. Rate limits, and connection limit
+
+###  Drop NULL packets ###
+/sbin/iptables -A INPUT -p tcp –tcp-flags ALL NONE -j DROP
+
+###  Limit connections per source IP ### 
+/sbin/iptables -A INPUT -p tcp -m connlimit --connlimit-above 200 -j REJECT --reject-with tcp-reset  
+
+###  Limit RST packets ### 
+/sbin/iptables -A INPUT -p tcp --tcp-flags RST RST -m limit --limit 2/s --limit-burst 2 -j ACCEPT 
+/sbin/iptables -A INPUT -p tcp --tcp-flags RST RST -j DROP  
+
+###  Limit new TCP connections per second per source IP ### 
+/sbin/iptables -A INPUT -p tcp -m conntrack --ctstate NEW -m limit --limit 60/s --limit-burst 20 -j ACCEPT 
+/sbin/iptables -A INPUT -p tcp -m conntrack --ctstate NEW -j DROP
+
+### SSH brute-force protection ### 
+/sbin/iptables -A INPUT -p tcp --dport ssh -m conntrack --ctstate NEW -m recent --set 
+/sbin/iptables -A INPUT -p tcp --dport ssh -m conntrack --ctstate NEW -m recent --update --seconds 60 --hitcount 10 -j DROP  
+
+### Protection against port scanning ### 
+/sbin/iptables -N port-scanning 
+/sbin/iptables -A port-scanning -p tcp --tcp-flags SYN,ACK,FIN,RST RST -m limit --limit 1/s --limit-burst 2 -j RETURN 
+/sbin/iptables -A port-scanning -j DROP
+
+
+
+
+##############################################################   GENERAL RULES
+
+# Local loopback, Allowed
+/sbin/iptables -I INPUT 1 -i lo -j ACCEPT
+
+# Unrequested traffic, Dropped
+/sbin/iptables -A INPUT -m conntrack --ctstate INVALID -j DROP
+
+# Allow Established and Related Incoming Connections
+/sbin/iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+# Log dropped packets
+/sbin/iptables -N LOGGING
+/sbin/iptables -A INPUT -j LOGGING
+/sbin/iptables -A LOGGING -m limit --limit 2/min -j LOG --log-prefix "IPTables Packet Dropped: " --log-level 7
+/sbin/iptables -A LOGGING -j DROP
+
+
+
+
+##############################################################   FILTERED DNS 9.9.9.9 
+
+# Quad9 DNS tied to IBM X-Force's Threat Intelligence
+/sbin/iptables -t nat -A OUTPUT -p tcp --dport 53 -j DNAT --to 9.9.9.9:53;
+/sbin/iptables -t nat -A OUTPUT -p udp --dport 53 -j DNAT --to 9.9.9.9:53;
+/sbin/iptables -t nat -A POSTROUTING -j MASQUERADE
+
+
+
+
+##############################################################   OPERATING SYSTEM UPDATES 
+
+#####   MacOS and Apple
+# Allow connection as required by MacOS's SoftwareUpdater
+# https://support.apple.com/en-us/HT200149
+/sbin/iptables -A OUTPUT -p tcp -d swscan.apple.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d swquery.apple.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d swdownload.apple.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d swdist.apple.com --dport 443 -j ACCEPT
+
+
+#####   Microsoft Updates
+/sbin/iptables -A OUTPUT -p tcp -d windowsupdate.microsoft.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d update.microsoft.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d download.microsoft.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d ntservicepack.microsoft.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d wustat.windows.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d stats.update.microsoft.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d windowsupdate.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d windowsupdate.microsoft.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d ntservicepack.microsoft.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d test.stats.update.microsoft.com --dport 80 -j ACCEPT
+
+
+#####     Ubuntu 
+deb http://archive.ubuntu.com/ubuntu bionic universe multiverse
+deb-src http://archive.ubuntu.com/ubuntu bionic universe multiverse
+deb http://us.archive.ubuntu.com/ubuntu/ bionic universe
+deb-src http://us.archive.ubuntu.com/ubuntu/ bionic universe
+deb http://us.archive.ubuntu.com/ubuntu/ bionic-updates universe
+deb-src http://us.archive.ubuntu.com/ubuntu/ bionic-updates universe
+deb http://us.archive.ubuntu.com/ubuntu/ bionic multiverse
+deb-src http://us.archive.ubuntu.com/ubuntu/ bionic multiverse
+deb http://us.archive.ubuntu.com/ubuntu/ bionic-updates multiverse
+deb-src http://us.archive.ubuntu.com/ubuntu/ bionic-updates multiverse
+deb http://security.ubuntu.com/ubuntu bionic-security universe
+deb-src http://security.ubuntu.com/ubuntu bionic-security universe
+deb http://security.ubuntu.com/ubuntu bionic-security multiverse
+deb-src http://security.ubuntu.com/ubuntu bionic-security multiverse
+
+
+#####    RedHat Enterprise Linux 
+# For up2date, yum, rhn_register, and satellite-sync to work correctly, the firewall must allow connections to:
+# https://access.redhat.com/solutions/11214
+/sbin/iptables -A OUTPUT -p tcp -d cdn.redhat.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d rhn.redhat.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d rhn.redhat.com --dport 443 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d xmlrpc.rhn.redhat.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d xmlrpc.rhn.redhat.com --dport 443 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d content-xmlrpc.rhn.redhat.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d content-xmlrpc.rhn.redhat.com --dport 443 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d content-web.rhn.redhat.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d content-web.rhn.redhat.com --dport 443 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d cdn.redhat.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d cdn.redhat.com --dport 443 -j ACCEPT
+
+####    Chrome OS
+/sbin/iptables -A OUTPUT -p tcp -d accounts.google.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d accounts.google.[country]1 --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d accounts.gstatic.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d accounts.youtube.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d alt.gstatic.com2 --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d chromeos-ca.gstatic.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d clients1.google.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d clients2.google.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d clients3.google.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d clients4.google.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d commondatastorage.googleapis.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d cros-omahaproxy.appspot.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d dl.google.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d dl-ssl.google.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d gvt1.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d gweb-gettingstartedguide.appspot.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d m.google.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d omahaproxy.appspot.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d pack.google.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d policies.google.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d safebrowsing-cache.google.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d safebrowsing.google.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d ssl.gstatic.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d storage.googleapis.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d tools.google.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d www.googleapis.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d www.gstatic.com2 --dport 80 -j ACCEPT
+
+
+
+
+
+
+##############################################################   MOBILE DEVICE UPDATES
+
+### Android
+/sbin/iptables -A OUTPUT -p tcp -d play.google.com --dport 80 -j ACCEPT 
+/sbin/iptables -A OUTPUT -p tcp -d play.google.com --dport 443 -j ACCEPT 
+/sbin/iptables -A OUTPUT -p tcp -d android.clients.google.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d android.clients.google.com --dport 443 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d accounts.google.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d accounts.google.com --dport 443 -j ACCEPT
+
+# Allow connection to FQDN as required Apple's Mobile Asset Software Update service
+/sbin/iptables -A OUTPUT -p tcp -d gdmf.apple.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d mesu.apple.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d cdn-apple.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d updates-http.cdn-apple.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d gdmf.apple.com --dport 443 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d mesu.apple.com --dport 443 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d cdn-apple.com --dport 443 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d updates-http.cdn-apple.com --dport 443 -j ACCEPT
+
+
+
+
+
+
+##############################################################   ANTIVIRUS UPDATES
+############# Windows Defender Antivirus 
+# Windows Defender Antivirus cloud service
+/sbin/iptables -A OUTPUT -p tcp -d wdcp.microsoft.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d wdcpalt.microsoft.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d wd.microsoft.com --dport 80 -j ACCEPT
+
+# Microsoft Update Service (MU)	
+/sbin/iptables -A OUTPUT -p tcp -d update.microsoft.com --dport 80 -j ACCEPT
+
+# Security Intelligence Alternate Download Location (ADL)
+/sbin/iptables -A OUTPUT -p tcp -d download.microsoft.com --dport 80 -j ACCEPT
+
+# Malware submission storage
+/sbin/iptables -A OUTPUT -p tcp -d blob.core.windows.net --dport 80 -j ACCEPT
+
+# Certificate Revocation List (CRL)
+/sbin/iptables -A OUTPUT -p tcp -d www.microsoft.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d crl.microsoft.com --dport 80 -j ACCEPT
+
+# Symbol Store
+# Used by Windows Defender Antivirus to restore files
+/sbin/iptables -A OUTPUT -p tcp -d msdl.microsoft.com --dport 443 -j ACCEPT
+
+# Universal Telemetry Client
+# Used by Windows to send client diagnostic data
+/sbin/iptables -A OUTPUT -p tcp -d vortex-win.data.microsoft.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d settings-win.data.microsoft.com --dport 80 -j ACCEPT
+
+
+#CLAMAV
+/sbin/iptables -A OUTPUT -p tcp -d database.clamav.net --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d current.cvd.clamav.net --dport 80 -j ACCEPT
+
+# BITDEFENDER
+/sbin/iptables -A OUTPUT -p tcp -d submit.bitdefender.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d upgrade.bitdefender.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d update.cloud.2d585.cdn.bitdefender.net --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d lv2.bitdefender.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d nimbus.bitdefender.net  --dport 442 -j ACCEPT
+
+#Symantec Live Update
+# http://www.symantec.com/docs/TECH139451
+/sbin/iptables -A OUTPUT -p tcp -d liveupdate.symantecliveupdate.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d liveupdate.symantec.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d akamai.net --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d update.symantec.com --dport 21 -j ACCEPT
+
+# MCAFEE
+/sbin/iptables -A OUTPUT -p tcp -d fftp.nai.com --dport 21 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d update.nai.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d epo.mcafee.com --dport 80 -j ACCEPT
+/sbin/iptables -A OUTPUT -p tcp -d s-download.mcafee.com --dport 80 -j ACCEPT
+
+
+##############################################################   DENY ALL REMAINING
+/sbin/iptables -P INPUT DROP
+/sbin/iptables -P OUTPUT DROP
